@@ -1378,6 +1378,125 @@ describe('Installer — Cursor rules file cleanup on uninstall', () => {
   });
 });
 
+describe('Installer — Trae MCP entry shape', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+  const trae = getTarget('trae')!;
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('trae-home');
+    tmpCwd = mkTmpDir('trae-cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  const mcpJsonPath = (loc: 'global' | 'local') =>
+    loc === 'global'
+      ? path.join(tmpHome, '.trae', 'mcp.json')
+      : path.join(tmpCwd, '.trae', 'mcp.json');
+
+  it('global install writes entry with workspaceFolder variable and no type field', () => {
+    const result = trae.install('global', { autoAllow: false });
+
+    expect(result.files.length).toBeGreaterThan(0);
+    const body = JSON.parse(fs.readFileSync(mcpJsonPath('global'), 'utf-8'));
+    const entry = body.mcpServers.codegraph;
+
+    // No type field — Trae auto-detects from command.
+    expect(entry).not.toHaveProperty('type');
+
+    // --path injected with workspaceFolder variable for global installs.
+    expect(entry.command).toBe('codegraph');
+    expect(entry.args).toContain('--path');
+    expect(entry.args).toContain('${workspaceFolder}');
+
+    // No autoApprove in v1.
+    expect(entry).not.toHaveProperty('autoApprove');
+  });
+
+  it('local install writes entry with absolute --path', () => {
+    trae.install('local', { autoAllow: false });
+
+    const body = JSON.parse(fs.readFileSync(mcpJsonPath('local'), 'utf-8'));
+    const entry = body.mcpServers.codegraph;
+
+    expect(entry).not.toHaveProperty('type');
+    expect(entry.args).toContain('--path');
+
+    // Local installs use an absolute path, never the variable.
+    const pathIdx = entry.args.indexOf('--path');
+    const pathVal = entry.args[pathIdx + 1];
+    expect(pathVal).toBe(tmpCwd);
+    expect(pathVal).not.toContain('${workspaceFolder}');
+  });
+
+  it('install returns notes with project-level MCP reminder for local installs', () => {
+    const result = trae.install('local', { autoAllow: false });
+    expect(result.notes).toBeDefined();
+    expect(result.notes!.some((n) => n.includes('Project-level MCP'))).toBe(true);
+  });
+
+  it('install preserves a pre-existing sibling MCP server', () => {
+    const file = mcpJsonPath('global');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ mcpServers: { github: { command: 'npx', args: ['-y', '@anthropic/server-github'] } } }, null, 2) + '\n',
+    );
+
+    trae.install('global', { autoAllow: false });
+
+    const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(after.mcpServers.github).toBeDefined();
+    expect(after.mcpServers.codegraph).toBeDefined();
+  });
+
+  it('uninstall removes codegraph but keeps sibling server', () => {
+    trae.install('global', { autoAllow: false });
+
+    // Plant a sibling before uninstall
+    const file = mcpJsonPath('global');
+    const body = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    body.mcpServers.github = { command: 'npx', args: ['-y', 'other-server'] };
+    fs.writeFileSync(file, JSON.stringify(body, null, 2) + '\n');
+
+    trae.uninstall('global');
+
+    const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(after.mcpServers.codegraph).toBeUndefined();
+    expect(after.mcpServers.github).toBeDefined();
+  });
+
+  it('re-running install is idempotent (all actions unchanged)', () => {
+    trae.install('global', { autoAllow: false });
+    const second = trae.install('global', { autoAllow: false });
+    for (const f of second.files) {
+      expect(f.action).toBe('unchanged');
+    }
+  });
+
+  it('printConfig output contains codegraph entry without type field', () => {
+    const out = trae.printConfig('global');
+    expect(out.length).toBeGreaterThan(0);
+    expect(out).toContain('"command": "codegraph"');
+    expect(out).toContain('"--path"');
+    // Verify no 'type' in the JSON snippet.
+    const jsonStart = out.indexOf('{');
+    const snippet = JSON.parse(out.slice(jsonStart));
+    expect(snippet.mcpServers.codegraph).not.toHaveProperty('type');
+  });
+});
+
 function listAllFiles(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const out: string[] = [];
